@@ -19,18 +19,20 @@ public class PaymentTransactionConfiguration : IEntityTypeConfiguration<PaymentT
             .HasMaxLength(200);
 
         builder.Property(x => x.GameId)
+            .IsRequired()
             .HasMaxLength(200);
 
         builder.Property(x => x.Amount)
-            .HasPrecision(18, 2);
-
-        builder.Property(x => x.Status)
+            .HasColumnType("decimal(18,2)")
             .IsRequired();
 
-        builder.Property(x => x.CorrelationId)
-            .HasMaxLength(200);
+        builder.Property(x => x.Status)
+            .HasConversion<int>()
+            .IsRequired();
 
-        builder.HasIndex(x => x.PurchaseId);
-        builder.HasIndex(x => x.UserId);
+        builder.Property(x => x.CreatedAtUtc)
+            .IsRequired();
+
+        builder.HasIndex(x => x.PurchaseId).IsUnique();
     }
 }

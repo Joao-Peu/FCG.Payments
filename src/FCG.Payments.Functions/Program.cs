@@ -2,23 +2,49 @@ using FCG.Payments.Application;
 using FCG.Payments.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Serilog;
+using Serilog.Sinks.ApplicationInsights.TelemetryConverters;
 
-var host = new HostBuilder()
-    .ConfigureFunctionsWorkerDefaults()
-    .ConfigureServices((context, services) =>
-    {
-        var sqlConnection = context.Configuration["SQL_CONNECTION"]
-            ?? "Server=localhost,1433;Database=PaymentsDb;User Id=sa;Password=Your_password123;TrustServerCertificate=True;";
-        var serviceBusConnection = context.Configuration["SERVICEBUS_CONNECTION"];
-        var appInsightsConnection = context.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"];
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Information()
+    .WriteTo.Console()
+    .CreateBootstrapLogger();
 
-        services.AddApplication();
-        services.AddInfrastructure(
-            sqlConnection,
-            serviceBusConnection,
-            appInsightsConnection,
-            "FCG.Payments.Functions");
-    })
-    .Build();
+try
+{
+    var host = new HostBuilder()
+        .ConfigureFunctionsWorkerDefaults()
+        .UseSerilog((context, loggerConfig) => loggerConfig
+            .ReadFrom.Configuration(context.Configuration)
+            .Enrich.FromLogContext()
+            .Enrich.WithMachineName()
+            .Enrich.WithThreadId()
+            .Enrich.WithProperty("ServiceName", "FCG.Payments.Functions")
+            .WriteTo.Console(outputTemplate:
+                "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj} {Properties:j}{NewLine}{Exception}")
+            .WriteTo.Conditional(
+                _ => !string.IsNullOrEmpty(context.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"]),
+                wt => wt.ApplicationInsights(
+                    context.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"],
+                    new TraceTelemetryConverter())))
+        .ConfigureServices((context, services) =>
+        {
+            var sqlConnection = context.Configuration["SQL_CONNECTION"]
+                ?? "Server=localhost,1433;Database=PaymentsDb;User Id=sa;Password=Your_password123;TrustServerCertificate=True;";
+            var serviceBusConnection = context.Configuration["SERVICEBUS_CONNECTION"];
 
-host.Run();
+            services.AddApplication();
+            services.AddInfrastructure(sqlConnection, serviceBusConnection);
+        })
+        .Build();
+
+    host.Run();
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "Application terminated unexpectedly");
+}
+finally
+{
+    Log.CloseAndFlush();
+}

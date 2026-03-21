@@ -22,28 +22,14 @@ public class PaymentTransactionRepositoryTests
     {
         var db = CreateContext();
         var repo = new PaymentTransactionRepository(db);
-        var tx = PaymentTransaction.Create("PUR-001", "USER-001", 100m, "corr-1", "GAME-001");
+        var tx = PaymentTransaction.Create("PUR-001", "USER-001", "GAME-001", 100m, PaymentStatus.Approved);
 
         await repo.AddAsync(tx);
 
         var found = await db.PaymentTransactions.FindAsync(tx.Id);
         Assert.NotNull(found);
         Assert.Equal("PUR-001", found.PurchaseId);
-        Assert.Equal("GAME-001", found.GameId);
-    }
-
-    [Fact]
-    public async Task GetByIdAsync_ShouldReturnTransaction()
-    {
-        var db = CreateContext();
-        var repo = new PaymentTransactionRepository(db);
-        var tx = PaymentTransaction.Create("PUR-001", "USER-001", 100m, "corr-1");
-        await repo.AddAsync(tx);
-
-        var result = await repo.GetByIdAsync(tx.Id);
-
-        Assert.NotNull(result);
-        Assert.Equal(tx.Id, result.Id);
+        Assert.Equal(PaymentStatus.Approved, found.Status);
     }
 
     [Fact]
@@ -51,7 +37,7 @@ public class PaymentTransactionRepositoryTests
     {
         var db = CreateContext();
         var repo = new PaymentTransactionRepository(db);
-        var tx = PaymentTransaction.Create("PUR-001", "USER-001", 100m, "corr-1");
+        var tx = PaymentTransaction.Create("PUR-001", "USER-001", "GAME-001", 100m, PaymentStatus.Approved);
         await repo.AddAsync(tx);
 
         var result = await repo.GetByPurchaseIdAsync("PUR-001");
@@ -61,52 +47,49 @@ public class PaymentTransactionRepositoryTests
     }
 
     [Fact]
-    public async Task QueryAsync_FilterByUserId_ShouldReturnOnlyUserTransactions()
+    public async Task GetByPurchaseIdAsync_NonExistent_ShouldReturnNull()
     {
         var db = CreateContext();
         var repo = new PaymentTransactionRepository(db);
 
-        await repo.AddAsync(PaymentTransaction.Create("PUR-001", "USER-001", 100m, "corr-1"));
-        await repo.AddAsync(PaymentTransaction.Create("PUR-002", "USER-001", 200m, "corr-2"));
-        await repo.AddAsync(PaymentTransaction.Create("PUR-003", "USER-002", 150m, "corr-3"));
+        var result = await repo.GetByPurchaseIdAsync("NONEXISTENT");
 
-        var result = await repo.QueryAsync(userId: "USER-001");
-
-        Assert.Equal(2, result.Count());
-        Assert.All(result, t => Assert.Equal("USER-001", t.UserId));
+        Assert.Null(result);
     }
 
     [Fact]
-    public async Task QueryAsync_FilterByStatus_ShouldReturnOnlyMatchingTransactions()
+    public async Task ExistsPendingAsync_WithPending_ShouldReturnTrue()
     {
         var db = CreateContext();
         var repo = new PaymentTransactionRepository(db);
+        await repo.AddAsync(PaymentTransaction.Create("PUR-001", "USER-001", "GAME-001", 100m, PaymentStatus.Pending));
 
-        var tx1 = PaymentTransaction.Create("PUR-001", "USER-001", 100m, "corr-1");
-        var tx2 = PaymentTransaction.Create("PUR-002", "USER-001", 200m, "corr-2");
-        tx2.UpdateStatus(PaymentStatus.Paid);
+        var result = await repo.ExistsPendingAsync("USER-001", "GAME-001");
 
-        await repo.AddAsync(tx1);
-        await repo.AddAsync(tx2);
-
-        var result = await repo.QueryAsync(status: PaymentStatus.Paid);
-
-        Assert.Single(result);
-        Assert.Equal(PaymentStatus.Paid, result.First().Status);
+        Assert.True(result);
     }
 
     [Fact]
-    public async Task UpdateAsync_ShouldPersistChanges()
+    public async Task ExistsPendingAsync_WithApproved_ShouldReturnFalse()
     {
         var db = CreateContext();
         var repo = new PaymentTransactionRepository(db);
-        var tx = PaymentTransaction.Create("PUR-001", "USER-001", 100m, "corr-1");
-        await repo.AddAsync(tx);
+        await repo.AddAsync(PaymentTransaction.Create("PUR-001", "USER-001", "GAME-001", 100m, PaymentStatus.Approved));
 
-        tx.UpdateStatus(PaymentStatus.Paid, "new-corr");
-        await repo.UpdateAsync(tx);
+        var result = await repo.ExistsPendingAsync("USER-001", "GAME-001");
 
-        var updated = await repo.GetByIdAsync(tx.Id);
-        Assert.Equal(PaymentStatus.Paid, updated!.Status);
+        Assert.False(result);
+    }
+
+    [Fact]
+    public async Task ExistsPendingAsync_DifferentGame_ShouldReturnFalse()
+    {
+        var db = CreateContext();
+        var repo = new PaymentTransactionRepository(db);
+        await repo.AddAsync(PaymentTransaction.Create("PUR-001", "USER-001", "GAME-001", 100m, PaymentStatus.Pending));
+
+        var result = await repo.ExistsPendingAsync("USER-001", "GAME-002");
+
+        Assert.False(result);
     }
 }

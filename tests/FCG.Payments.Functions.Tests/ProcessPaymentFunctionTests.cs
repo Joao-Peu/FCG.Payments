@@ -1,7 +1,9 @@
 using System.Text.Json;
-using FCG.Payments.Application.Commands.ProcessPayment;
+using FCG.Payments.Application.Messaging;
+using FCG.Payments.Domain.Entities;
+using FCG.Payments.Domain.Events;
+using FCG.Payments.Domain.Interfaces;
 using FCG.Payments.Functions;
-using MediatR;
 using Microsoft.Extensions.Logging;
 using Moq;
 using Xunit;
@@ -10,30 +12,83 @@ namespace FCG.Payments.Functions.Tests;
 
 public class ProcessPaymentFunctionTests
 {
-    private readonly Mock<IMediator> _mockMediator;
+    private readonly Mock<IPaymentTransactionRepository> _mockRepo;
+    private readonly Mock<IMessagePublisher> _mockPublisher;
     private readonly Mock<ILogger<ProcessPaymentFunction>> _mockLogger;
     private readonly ProcessPaymentFunction _function;
 
     public ProcessPaymentFunctionTests()
     {
-        _mockMediator = new Mock<IMediator>();
+        _mockRepo = new Mock<IPaymentTransactionRepository>();
+        _mockPublisher = new Mock<IMessagePublisher>();
         _mockLogger = new Mock<ILogger<ProcessPaymentFunction>>();
-        _function = new ProcessPaymentFunction(_mockMediator.Object, _mockLogger.Object);
+        _function = new ProcessPaymentFunction(_mockRepo.Object, _mockPublisher.Object, _mockLogger.Object);
     }
 
     [Fact]
-    public async Task Run_WithValidMessage_ShouldSendProcessCommand()
+    public async Task Run_EvenCents_ShouldCreateTransactionWithApprovedStatus()
     {
-        var txId = Guid.NewGuid();
-        var message = JsonSerializer.Serialize(new { Id = txId, Amount = 100.50m, CorrelationId = "corr-1" });
+        var orderEvent = new OrderPlacedEvent("ORDER-001", "USER-001", "GAME-001", 59.98m);
+        var message = JsonSerializer.Serialize(orderEvent);
+        _mockRepo.Setup(r => r.ExistsPendingAsync("USER-001", "GAME-001", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
 
         await _function.Run(message);
 
-        _mockMediator.Verify(m => m.Send(
-            It.Is<ProcessPaymentCommand>(c =>
-                c.TransactionId == txId &&
-                c.Amount == 100.50m &&
-                c.CorrelationId == "corr-1"),
+        _mockRepo.Verify(r => r.AddAsync(
+            It.Is<PaymentTransaction>(t =>
+                t.PurchaseId == "ORDER-001" &&
+                t.UserId == "USER-001" &&
+                t.GameId == "GAME-001" &&
+                t.Amount == 59.98m),
             It.IsAny<CancellationToken>()), Times.Once);
+
+        _mockPublisher.Verify(p => p.PublishAsync(
+            "payments-processed",
+            It.Is<MessageEnvelope>(e => e.MessageType == "PaymentProcessed"),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Run_OddCents_ShouldCreateTransactionWithRejectedStatus()
+    {
+        var orderEvent = new OrderPlacedEvent("ORDER-002", "USER-001", "GAME-001", 59.99m);
+        var message = JsonSerializer.Serialize(orderEvent);
+        _mockRepo.Setup(r => r.ExistsPendingAsync("USER-001", "GAME-001", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        await _function.Run(message);
+
+        _mockRepo.Verify(r => r.AddAsync(
+            It.IsAny<PaymentTransaction>(),
+            It.IsAny<CancellationToken>()), Times.Once);
+
+        _mockPublisher.Verify(p => p.PublishAsync(
+            "payments-processed",
+            It.IsAny<MessageEnvelope>(),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Run_AlreadyPending_ShouldSkipProcessing()
+    {
+        var orderEvent = new OrderPlacedEvent("ORDER-003", "USER-001", "GAME-001", 100m);
+        var message = JsonSerializer.Serialize(orderEvent);
+        _mockRepo.Setup(r => r.ExistsPendingAsync("USER-001", "GAME-001", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+
+        await _function.Run(message);
+
+        _mockRepo.Verify(r => r.AddAsync(It.IsAny<PaymentTransaction>(), It.IsAny<CancellationToken>()), Times.Never);
+        _mockPublisher.Verify(p => p.PublishAsync(It.IsAny<string>(), It.IsAny<MessageEnvelope>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Run_InvalidMessage_ShouldNotProcess()
+    {
+        await _function.Run("not valid json {}{}");
+
+        _mockRepo.Verify(r => r.AddAsync(It.IsAny<PaymentTransaction>(), It.IsAny<CancellationToken>()), Times.Never);
+        _mockPublisher.Verify(p => p.PublishAsync(It.IsAny<string>(), It.IsAny<MessageEnvelope>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 }

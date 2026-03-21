@@ -4,7 +4,6 @@ using FCG.Payments.Domain.Interfaces;
 using FCG.Payments.Infrastructure.Messaging;
 using FCG.Payments.Infrastructure.Persistence;
 using FCG.Payments.Infrastructure.Persistence.Repositories;
-using FCG.Payments.Infrastructure.Telemetry;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -15,9 +14,7 @@ public static class DependencyInjection
     public static IServiceCollection AddInfrastructure(
         this IServiceCollection services,
         string sqlConnectionString,
-        string? serviceBusConnectionString = null,
-        string? applicationInsightsConnectionString = null,
-        string serviceName = "FCG.Payments")
+        string? serviceBusConnectionString = null)
     {
         // EF Core with SQL Server
         services.AddDbContext<PaymentsDbContext>(opts =>
@@ -40,9 +37,6 @@ public static class DependencyInjection
         {
             services.AddSingleton<IMessagePublisher, InMemoryMessagePublisher>();
         }
-
-        // Telemetry
-        services.AddTelemetry(serviceName, applicationInsightsConnectionString);
 
         return services;
     }

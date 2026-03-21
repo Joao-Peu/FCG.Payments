@@ -1,6 +1,9 @@
 using System.Text.Json;
-using FCG.Payments.Application.Commands.ProcessPayment;
-using MediatR;
+using FCG.Payments.Application.Messaging;
+using FCG.Payments.Domain.Entities;
+using FCG.Payments.Domain.Enums;
+using FCG.Payments.Domain.Events;
+using FCG.Payments.Domain.Interfaces;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
 
@@ -8,31 +11,84 @@ namespace FCG.Payments.Functions;
 
 public class ProcessPaymentFunction
 {
-    private readonly IMediator _mediator;
+    private readonly IPaymentTransactionRepository _repository;
+    private readonly IMessagePublisher _publisher;
     private readonly ILogger<ProcessPaymentFunction> _logger;
 
-    public ProcessPaymentFunction(IMediator mediator, ILogger<ProcessPaymentFunction> logger)
+    public ProcessPaymentFunction(
+        IPaymentTransactionRepository repository,
+        IMessagePublisher publisher,
+        ILogger<ProcessPaymentFunction> logger)
     {
-        _mediator = mediator;
+        _repository = repository;
+        _publisher = publisher;
         _logger = logger;
     }
 
     [Function("ProcessPaymentFunction")]
     public async Task Run(
-        [ServiceBusTrigger("payments-start", Connection = "SERVICEBUS_CONNECTION")] string message)
+        [ServiceBusTrigger("order-placed", Connection = "SERVICEBUS_CONNECTION")] string message)
     {
         _logger.LogInformation("ProcessPaymentFunction triggered: {msg}", message);
 
-        var doc = JsonDocument.Parse(message);
-        var id = doc.RootElement.GetProperty("Id").GetGuid();
-        var amount = doc.RootElement.GetProperty("Amount").GetDecimal();
-        var correlationId = doc.RootElement.TryGetProperty("CorrelationId", out var c)
-            ? c.GetString() ?? string.Empty
-            : string.Empty;
+        OrderPlacedEvent? orderEvent;
+        try
+        {
+            orderEvent = JsonSerializer.Deserialize<OrderPlacedEvent>(message, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogError(ex, "Failed to parse message as OrderPlacedEvent");
+            return;
+        }
 
-        var command = new ProcessPaymentCommand(id, amount, correlationId);
-        await _mediator.Send(command);
+        if (orderEvent is null)
+        {
+            _logger.LogWarning("Failed to deserialize OrderPlacedEvent from message");
+            return;
+        }
 
-        _logger.LogInformation("Processed payment {id}", id);
+        var pending = await _repository.ExistsPendingAsync(orderEvent.UserId, orderEvent.GameId);
+        if (pending)
+        {
+            _logger.LogWarning("Payment for user {UserId} and game {GameId} already pending",
+                orderEvent.UserId, orderEvent.GameId);
+            return;
+        }
+
+        var cents = (int)((orderEvent.Price - Math.Floor(orderEvent.Price)) * 100);
+        var status = (cents % 2 == 0) ? PaymentStatus.Approved : PaymentStatus.Rejected;
+
+        _logger.LogInformation("Payment for order {OrderId}: {Status}", orderEvent.OrderId, status);
+
+        var transaction = PaymentTransaction.Create(
+            orderEvent.OrderId,
+            orderEvent.UserId,
+            orderEvent.GameId,
+            orderEvent.Price,
+            status);
+
+        await _repository.AddAsync(transaction);
+
+        var processedEvent = new PaymentProcessedEvent(
+            transaction.PurchaseId,
+            transaction.UserId,
+            transaction.GameId,
+            transaction.Amount,
+            status.ToString());
+
+        var envelope = new MessageEnvelope(
+            "PaymentProcessed",
+            JsonSerializer.Serialize(processedEvent),
+            "",
+            "");
+
+        await _publisher.PublishAsync("payments-processed", envelope);
+
+        _logger.LogInformation("Payment {TransactionId} for order {OrderId} -> {Status}",
+            transaction.Id, orderEvent.OrderId, status);
     }
 }

@@ -1,123 +1,142 @@
 # FCG.Payments
 
-Sistema de processamento de pagamentos para a plataforma FCG (Fiap Cloud Gaming). Processa pagamentos de compra de jogos através de integração com Azure Service Bus.
+Microsserviço de processamento de pagamentos para a plataforma FCG (FIAP Cloud Games). Processa pagamentos de compra de jogos de forma assíncrona através de Azure Functions com trigger de Azure Service Bus. Projeto da **Fase 3 do Tech Challenge — PosTech FIAP**.
 
-## Arquitetura
+## Diagrama de Arquitetura
 
-O projeto segue **CQRS** com **MediatR** e está organizado em camadas:
+```mermaid
+graph TB
+    subgraph "FCG.Payments - Microsserviço de Pagamentos"
+        subgraph "Azure Functions Layer"
+            PPF[ProcessPaymentFunction]
+            TR[ServiceBusTrigger]
+        end
 
-```
-src/
-├── FCG.Payments.Domain          # Entidades, enums, eventos, interfaces
-├── FCG.Payments.Application     # Commands, Queries, Handlers (MediatR)
-├── FCG.Payments.Infrastructure  # EF Core, Service Bus, Telemetry
-├── FCG.Payments.Api             # ASP.NET Core Web API
-└── FCG.Payments.Functions       # Azure Functions (Service Bus triggers)
+        subgraph "Application Layer"
+            MP[IMessagePublisher]
+            ME[MessageEnvelope]
+        end
 
-tests/
-├── FCG.Payments.Domain.Tests
-├── FCG.Payments.Application.Tests
-├── FCG.Payments.Infrastructure.Tests
-├── FCG.Payments.Api.Tests
-└── FCG.Payments.Functions.Tests
+        subgraph "Domain Layer"
+            PT[PaymentTransaction Entity]
+            PS[PaymentStatus Enum]
+            OPE[OrderPlacedEvent]
+            PPE[PaymentProcessedEvent]
+        end
+
+        subgraph "Infrastructure Layer"
+            REPO[PaymentTransactionRepository]
+            SBP[ServiceBusMessagePublisher]
+            PDBC[PaymentsDbContext]
+            DB[(SQL Server)]
+        end
+    end
+
+    SBIn[/Queue: order-placed\] --> TR --> PPF
+    PPF --> REPO & SBP
+    REPO --> PDBC --> DB
+    SBP --> SBOut[/Queue: payments-processed\]
 ```
 
 ## Fluxo de Mensagens
 
-```
-Games Service → OrderPlacedEvent → queue "order-placed"
-                                        ↓
-                              ConsumeOrderPlacedFunction
-                              → CreatePaymentTransactionCommand
-                              → salva transação (Status=Created)
-                              → publica → queue "payments-start"
-                                                ↓
-                                  ProcessPaymentFunction
-                                  → ProcessPaymentCommand
-                                  → centavos pares = Paid, ímpares = Failed
-                                  → publica PaymentProcessedEvent
-                                        ↓
-Games Service ← queue "payments-processed"
-  Se Paid → adiciona jogo à biblioteca
-  Se Failed → rejeita
+```mermaid
+sequenceDiagram
+    participant GS as FCG.Games Service
+    participant Q1 as Queue: order-placed
+    participant PF as ProcessPaymentFunction
+    participant DB as SQL Server
+    participant Q2 as Queue: payments-processed
+
+    GS->>Q1: OrderPlacedEvent
+    Q1->>PF: ServiceBusTrigger
+    PF->>DB: Verifica duplicidade (ExistsPendingAsync)
+
+    alt Pagamento duplicado
+        PF-->>PF: Log warning + skip
+    else Novo pagamento
+        Note over PF: Centavos pares = Approved<br/>Centavos ímpares = Rejected
+        PF->>DB: Salva PaymentTransaction
+        PF->>Q2: PaymentProcessedEvent
+    end
+
+    Q2->>GS: Consumer recebe resultado
 ```
 
-**Filas Service Bus:**
-- `order-placed` — entrada (Games → Payments)
-- `payments-start` — interna (API → ProcessPayment Function)
-- `payments-processed` — saída (Payments → Games)
-- `notifications` — interna (stub para notificações)
+## Arquitetura
+
+O projeto segue **Clean Architecture** com Azure Functions Isolated Worker (.NET 8):
+
+```
+src/
+├── FCG.Payments.Domain/           # Entidades, Enums, Eventos, Interfaces (zero dependências)
+├── FCG.Payments.Application/      # IMessagePublisher, MessageEnvelope
+├── FCG.Payments.Infrastructure/   # EF Core, Service Bus Publisher, Repositórios
+└── FCG.Payments.Functions/        # Azure Functions (ServiceBusTrigger)
+tests/
+├── FCG.Payments.Domain.Tests/          # Testes de entidade PaymentTransaction
+├── FCG.Payments.Infrastructure.Tests/  # Testes do repositório com EF InMemory
+└── FCG.Payments.Functions.Tests/       # Testes da Function com mocks
+```
+
+**Fluxo de dependências:** Domain ← Application ← Infrastructure; Functions → Application + Infrastructure
+
+## Regra de Negócio
+
+O processamento de pagamento usa uma regra determinística para simulação:
+
+| Centavos do preço | Status |
+|-------------------|--------|
+| Pares (ex: R$ 59.**90**) | `Approved` |
+| Ímpares (ex: R$ 49.**99**) | `Rejected` |
 
 ## Configuração
 
 | Variável | Descrição | Padrão |
 |----------|-----------|--------|
-| `SQL_CONNECTION` | Connection string do SQL Server/Azure SQL | localhost SA |
-| `SERVICEBUS_CONNECTION` | Connection string do Azure Service Bus | (in-memory se vazio) |
-| `APPLICATIONINSIGHTS_CONNECTION_STRING` | Connection string do Application Insights | (desabilitado se vazio) |
+| `SQL_CONNECTION` | Connection string do SQL Server | `localhost SA` |
+| `SERVICEBUS_CONNECTION` | Connection string do Azure Service Bus | (InMemory se vazio) |
+| `APPLICATIONINSIGHTS_CONNECTION_STRING` | Application Insights | (desabilitado se vazio) |
 
-## Desenvolvimento Local
-
-### Pré-requisitos
-- .NET 8.0 SDK
-- SQL Server (ou Docker)
-- Azure Functions Core Tools (para Functions)
-
-### Build e Testes
+## Build & Run
 
 ```bash
 # Build
 dotnet build
 
-# Rodar todos os testes
+# Rodar testes (22 testes)
 dotnet test
 
-# Rodar testes de um projeto específico
-dotnet test tests/FCG.Payments.Application.Tests
-
-# Rodar um teste específico
-dotnet test --filter "FullyQualifiedName~CreatePaymentTransactionHandlerTests"
-
-# Testes com cobertura
-dotnet test /p:CollectCoverage=true /p:CoverageFormat=opencover
+# Rodar Functions localmente (requer Azure Functions Core Tools)
+cd src/FCG.Payments.Functions
+func start
 ```
 
-### Executar API
+## Docker
 
 ```bash
-dotnet run --project src/FCG.Payments.Api
+docker build -f src/FCG.Payments.Functions/Dockerfile -t fcg-payments .
+docker run -p 5098:80 \
+  -e SQL_CONNECTION="Server=tcp:..." \
+  -e SERVICEBUS_CONNECTION="Endpoint=sb://..." \
+  fcg-payments
 ```
 
-A API estará disponível em `http://localhost:5098` com Swagger UI.
+## Testes
 
-### Docker
+22 testes com xUnit + Moq:
 
-```bash
-# Build API
-docker build -f src/FCG.Payments.Api/Dockerfile -t fcg-payments-api .
-
-# Build Functions
-docker build -f src/FCG.Payments.Functions/Dockerfile -t fcg-payments-functions .
-```
-
-## API Endpoints
-
-| Método | Rota | Descrição |
-|--------|------|-----------|
-| `POST` | `/api/payments` | Criar pagamento |
-| `GET` | `/api/payments/{purchaseId}` | Consultar status do pagamento |
-| `GET` | `/api/payments/transactions` | Listar transações (com filtros) |
-| `GET` | `/health` | Health check |
-| `GET` | `/ready` | Readiness check |
+| Projeto | Testes |
+|---------|--------|
+| Domain (PaymentTransaction) | 12 |
+| Infrastructure (Repository + EF InMemory) | 6 |
+| Functions (ProcessPaymentFunction) | 4 |
 
 ## Tecnologias
 
 - .NET 8.0
-- ASP.NET Core Web API
 - Azure Functions (Isolated Worker)
-- Azure Service Bus
-- Azure SQL (Serverless)
-- Azure Monitor (Application Insights + OpenTelemetry)
-- Entity Framework Core 8
-- MediatR 12
+- Azure Service Bus (Queues — plano Basic)
+- Entity Framework Core 8 (SQL Server)
+- Serilog + Application Insights
 - xUnit + Moq

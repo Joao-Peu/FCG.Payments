@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Text.Json;
+using Azure.Messaging.ServiceBus;
 using FCG.Payments.Application.Messaging;
 using FCG.Payments.Domain.Entities;
 using FCG.Payments.Domain.Enums;
@@ -27,9 +29,19 @@ public class ProcessPaymentFunction
 
     [Function("ProcessPaymentFunction")]
     public async Task Run(
-        [ServiceBusTrigger("order-placed", Connection = "SERVICEBUS_CONNECTION")] string message)
+        [ServiceBusTrigger("order-placed", Connection = "SERVICEBUS_CONNECTION")] ServiceBusReceivedMessage sbMessage)
     {
-        _logger.LogInformation("ProcessPaymentFunction triggered: {msg}", message);
+        var correlationId = sbMessage.CorrelationId ?? Guid.NewGuid().ToString();
+        var message = sbMessage.Body.ToString();
+
+        using var activity = new Activity("process-payment");
+        activity.SetParentId(correlationId);
+        activity.Start();
+
+        using var logScope = _logger.BeginScope(new Dictionary<string, object> { ["CorrelationId"] = correlationId });
+
+        _logger.LogInformation("ProcessPaymentFunction triggered with CorrelationId {CorrelationId}: {msg}",
+            correlationId, message);
 
         OrderPlacedEvent? orderEvent;
         try
@@ -83,13 +95,13 @@ public class ProcessPaymentFunction
         var envelope = new MessageEnvelope(
             "PaymentProcessed",
             JsonSerializer.Serialize(processedEvent),
-            "",
-            "");
+            correlationId,
+            Activity.Current?.Id ?? "");
 
         await _publisher.PublishAsync("payments-processed", envelope);
         await _publisher.PublishAsync("notifications-payment-processed", envelope);
 
-        _logger.LogInformation("Payment {TransactionId} for order {OrderId} -> {Status}",
-            transaction.Id, orderEvent.OrderId, status);
+        _logger.LogInformation("Payment {TransactionId} for order {OrderId} -> {Status} CorrelationId {CorrelationId}",
+            transaction.Id, orderEvent.OrderId, status, correlationId);
     }
 }

@@ -87,6 +87,7 @@ public class ProcessPaymentFunction
             "");
 
         await _publisher.PublishAsync("payments-processed", envelope);
+        await _publisher.PublishAsync("notifications-payment-processed", envelope);
 
         _logger.LogInformation("Payment {TransactionId} for order {OrderId} -> {Status}",
             transaction.Id, orderEvent.OrderId, status);

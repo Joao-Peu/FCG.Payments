@@ -1,5 +1,7 @@
 using FCG.Payments.Application;
 using FCG.Payments.Infrastructure;
+using FCG.Payments.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Serilog;
@@ -37,6 +39,11 @@ try
             services.AddInfrastructure(sqlConnection, serviceBusConnection);
         })
         .Build();
+
+    using var scope = host.Services.CreateScope();
+    var db = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
+    db.Database.EnsureCreated();
+    Log.Information("Database ensured created successfully");
 
     host.Run();
 }

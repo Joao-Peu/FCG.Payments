@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Text.Json;
-using Azure.Messaging.ServiceBus;
 using FCG.Payments.Application.Messaging;
 using FCG.Payments.Domain.Entities;
 using FCG.Payments.Domain.Enums;
@@ -29,20 +28,18 @@ public class ProcessPaymentFunction
 
     [Function("ProcessPaymentFunction")]
     public async Task Run(
-        [ServiceBusTrigger("order-placed", Connection = "SERVICEBUS_CONNECTION")] ServiceBusReceivedMessage sbMessage)
+        [ServiceBusTrigger("order-placed", Connection = "SERVICEBUS_CONNECTION")] string message,
+        FunctionContext context)
     {
         var sw = Stopwatch.StartNew();
 
-        if (sbMessage is null)
-        {
-            _logger.LogError("[STEP:RECEIVE] Received null ServiceBusReceivedMessage");
-            return;
-        }
-
-        var messageId = sbMessage.MessageId ?? "unknown";
-        var correlationId = sbMessage.CorrelationId ?? Guid.NewGuid().ToString();
-        var enqueuedTime = sbMessage.EnqueuedTime;
-        var deliveryCount = sbMessage.DeliveryCount;
+        // Extract metadata from binding data
+        var bindingData = context.BindingContext.BindingData;
+        var messageId = bindingData.TryGetValue("MessageId", out var mid) ? mid?.ToString() ?? "unknown" : "unknown";
+        var correlationId = bindingData.TryGetValue("CorrelationId", out var cid) && !string.IsNullOrEmpty(cid?.ToString())
+            ? cid.ToString()!
+            : Guid.NewGuid().ToString();
+        var deliveryCount = bindingData.TryGetValue("DeliveryCount", out var dc) ? dc?.ToString() ?? "0" : "0";
 
         using var logScope = _logger.BeginScope(new Dictionary<string, object>
         {
@@ -52,10 +49,8 @@ public class ProcessPaymentFunction
         });
 
         _logger.LogInformation(
-            "[STEP:RECEIVE] Message received. MessageId={MessageId}, EnqueuedTime={EnqueuedTime}, DeliveryCount={DeliveryCount}, ContentType={ContentType}",
-            messageId, enqueuedTime, deliveryCount, sbMessage.ContentType ?? "null");
-
-        var message = sbMessage.Body?.ToString();
+            "[STEP:RECEIVE] Message received. MessageId={MessageId}, DeliveryCount={DeliveryCount}, CorrelationId={CorrelationId}",
+            messageId, deliveryCount, correlationId);
 
         if (string.IsNullOrEmpty(message))
         {
@@ -72,7 +67,7 @@ public class ProcessPaymentFunction
         OrderPlacedEvent? orderEvent;
         try
         {
-            orderEvent = JsonSerializer.Deserialize<OrderPlacedEvent>(message!, new JsonSerializerOptions
+            orderEvent = JsonSerializer.Deserialize<OrderPlacedEvent>(message, new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true
             });

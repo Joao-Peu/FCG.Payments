@@ -1,10 +1,11 @@
+using System.Collections.Immutable;
 using System.Text.Json;
-using Azure.Messaging.ServiceBus;
 using FCG.Payments.Application.Messaging;
 using FCG.Payments.Domain.Entities;
 using FCG.Payments.Domain.Events;
 using FCG.Payments.Domain.Interfaces;
 using FCG.Payments.Functions;
+using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
 using Moq;
 using Xunit;
@@ -26,23 +27,34 @@ public class ProcessPaymentFunctionTests
         _function = new ProcessPaymentFunction(_mockRepo.Object, _mockPublisher.Object, _mockLogger.Object);
     }
 
-    private static ServiceBusReceivedMessage CreateMessage(string body, string? correlationId = null)
+    private static FunctionContext CreateFunctionContext(string correlationId = "test-correlation-id")
     {
-        var sbMessage = ServiceBusModelFactory.ServiceBusReceivedMessage(
-            body: BinaryData.FromString(body),
-            correlationId: correlationId ?? "test-correlation-id");
-        return sbMessage;
+        var bindingData = new Dictionary<string, object?>
+        {
+            ["MessageId"] = "test-message-id",
+            ["CorrelationId"] = correlationId,
+            ["DeliveryCount"] = "1"
+        };
+
+        var bindingContext = new Mock<BindingContext>();
+        bindingContext.Setup(b => b.BindingData).Returns(bindingData.ToImmutableDictionary());
+
+        var functionContext = new Mock<FunctionContext>();
+        functionContext.Setup(c => c.BindingContext).Returns(bindingContext.Object);
+
+        return functionContext.Object;
     }
 
     [Fact]
     public async Task Run_EvenCents_ShouldCreateTransactionWithApprovedStatus()
     {
         var orderEvent = new OrderPlacedEvent("ORDER-001", "USER-001", "GAME-001", 59.98m);
-        var message = CreateMessage(JsonSerializer.Serialize(orderEvent));
+        var message = JsonSerializer.Serialize(orderEvent);
+        var context = CreateFunctionContext();
         _mockRepo.Setup(r => r.ExistsPendingAsync("USER-001", "GAME-001", It.IsAny<CancellationToken>()))
             .ReturnsAsync(false);
 
-        await _function.Run(message);
+        await _function.Run(message, context);
 
         _mockRepo.Verify(r => r.AddAsync(
             It.Is<PaymentTransaction>(t =>
@@ -62,11 +74,12 @@ public class ProcessPaymentFunctionTests
     public async Task Run_OddCents_ShouldCreateTransactionWithRejectedStatus()
     {
         var orderEvent = new OrderPlacedEvent("ORDER-002", "USER-001", "GAME-001", 59.99m);
-        var message = CreateMessage(JsonSerializer.Serialize(orderEvent));
+        var message = JsonSerializer.Serialize(orderEvent);
+        var context = CreateFunctionContext();
         _mockRepo.Setup(r => r.ExistsPendingAsync("USER-001", "GAME-001", It.IsAny<CancellationToken>()))
             .ReturnsAsync(false);
 
-        await _function.Run(message);
+        await _function.Run(message, context);
 
         _mockRepo.Verify(r => r.AddAsync(
             It.IsAny<PaymentTransaction>(),
@@ -82,11 +95,12 @@ public class ProcessPaymentFunctionTests
     public async Task Run_AlreadyPending_ShouldSkipProcessing()
     {
         var orderEvent = new OrderPlacedEvent("ORDER-003", "USER-001", "GAME-001", 100m);
-        var message = CreateMessage(JsonSerializer.Serialize(orderEvent));
+        var message = JsonSerializer.Serialize(orderEvent);
+        var context = CreateFunctionContext();
         _mockRepo.Setup(r => r.ExistsPendingAsync("USER-001", "GAME-001", It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
 
-        await _function.Run(message);
+        await _function.Run(message, context);
 
         _mockRepo.Verify(r => r.AddAsync(It.IsAny<PaymentTransaction>(), It.IsAny<CancellationToken>()), Times.Never);
         _mockPublisher.Verify(p => p.PublishAsync(It.IsAny<string>(), It.IsAny<MessageEnvelope>(), It.IsAny<CancellationToken>()), Times.Never);
@@ -95,9 +109,9 @@ public class ProcessPaymentFunctionTests
     [Fact]
     public async Task Run_InvalidMessage_ShouldNotProcess()
     {
-        var message = CreateMessage("not valid json {}{}");
+        var context = CreateFunctionContext();
 
-        await _function.Run(message);
+        await _function.Run("not valid json {}{}", context);
 
         _mockRepo.Verify(r => r.AddAsync(It.IsAny<PaymentTransaction>(), It.IsAny<CancellationToken>()), Times.Never);
         _mockPublisher.Verify(p => p.PublishAsync(It.IsAny<string>(), It.IsAny<MessageEnvelope>(), It.IsAny<CancellationToken>()), Times.Never);

@@ -31,42 +31,73 @@ public class ProcessPaymentFunction
     public async Task Run(
         [ServiceBusTrigger("order-placed", Connection = "SERVICEBUS_CONNECTION")] ServiceBusReceivedMessage sbMessage)
     {
+        var sw = Stopwatch.StartNew();
+
+        if (sbMessage is null)
+        {
+            _logger.LogError("[STEP:RECEIVE] Received null ServiceBusReceivedMessage");
+            return;
+        }
+
+        var messageId = sbMessage.MessageId ?? "unknown";
         var correlationId = sbMessage.CorrelationId ?? Guid.NewGuid().ToString();
-        var message = sbMessage.Body.ToString();
+        var enqueuedTime = sbMessage.EnqueuedTime;
+        var deliveryCount = sbMessage.DeliveryCount;
+
+        using var logScope = _logger.BeginScope(new Dictionary<string, object>
+        {
+            ["CorrelationId"] = correlationId,
+            ["MessageId"] = messageId,
+            ["DeliveryCount"] = deliveryCount
+        });
+
+        _logger.LogInformation(
+            "[STEP:RECEIVE] Message received. MessageId={MessageId}, EnqueuedTime={EnqueuedTime}, DeliveryCount={DeliveryCount}, ContentType={ContentType}",
+            messageId, enqueuedTime, deliveryCount, sbMessage.ContentType ?? "null");
+
+        var message = sbMessage.Body?.ToString();
+
+        if (string.IsNullOrEmpty(message))
+        {
+            _logger.LogError("[STEP:RECEIVE] Empty message body. MessageId={MessageId}", messageId);
+            return;
+        }
+
+        _logger.LogInformation("[STEP:DESERIALIZE] Raw body: {Body}", message);
 
         using var activity = new Activity("process-payment");
         activity.SetParentId(correlationId);
         activity.Start();
 
-        using var logScope = _logger.BeginScope(new Dictionary<string, object> { ["CorrelationId"] = correlationId });
-
-        _logger.LogInformation("ProcessPaymentFunction triggered with CorrelationId {CorrelationId}: {msg}",
-            correlationId, message);
-
         OrderPlacedEvent? orderEvent;
         try
         {
-            orderEvent = JsonSerializer.Deserialize<OrderPlacedEvent>(message, new JsonSerializerOptions
+            orderEvent = JsonSerializer.Deserialize<OrderPlacedEvent>(message!, new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true
             });
         }
         catch (JsonException ex)
         {
-            _logger.LogError(ex, "Failed to parse message as OrderPlacedEvent");
+            _logger.LogError("[STEP:DESERIALIZE] Failed to parse OrderPlacedEvent. Error={Error}, Body={Body}",
+                ex.Message, message);
             return;
         }
 
         if (orderEvent is null)
         {
-            _logger.LogWarning("Failed to deserialize OrderPlacedEvent from message");
+            _logger.LogWarning("[STEP:DESERIALIZE] Deserialized to null. Body={Body}", message);
             return;
         }
+
+        _logger.LogInformation(
+            "[STEP:DESERIALIZE] OK. OrderId={OrderId}, UserId={UserId}, GameId={GameId}, Price={Price}",
+            orderEvent.OrderId, orderEvent.UserId, orderEvent.GameId, orderEvent.Price);
 
         var pending = await _repository.ExistsPendingAsync(orderEvent.UserId, orderEvent.GameId);
         if (pending)
         {
-            _logger.LogWarning("Payment for user {UserId} and game {GameId} already pending",
+            _logger.LogWarning("[STEP:DUPLICATE] Payment already pending. UserId={UserId}, GameId={GameId}",
                 orderEvent.UserId, orderEvent.GameId);
             return;
         }
@@ -74,7 +105,8 @@ public class ProcessPaymentFunction
         var cents = (int)((orderEvent.Price - Math.Floor(orderEvent.Price)) * 100);
         var status = (cents % 2 == 0) ? PaymentStatus.Approved : PaymentStatus.Rejected;
 
-        _logger.LogInformation("Payment for order {OrderId}: {Status}", orderEvent.OrderId, status);
+        _logger.LogInformation("[STEP:PROCESS] Payment decision. OrderId={OrderId}, Cents={Cents}, Status={Status}",
+            orderEvent.OrderId, cents, status);
 
         var transaction = PaymentTransaction.Create(
             orderEvent.OrderId,
@@ -84,6 +116,7 @@ public class ProcessPaymentFunction
             status);
 
         await _repository.AddAsync(transaction);
+        _logger.LogInformation("[STEP:PERSIST] Transaction saved. TransactionId={TransactionId}", transaction.Id);
 
         var processedEvent = new PaymentProcessedEvent(
             transaction.PurchaseId,
@@ -99,9 +132,14 @@ public class ProcessPaymentFunction
             Activity.Current?.Id ?? "");
 
         await _publisher.PublishAsync("payments-processed", envelope);
-        await _publisher.PublishAsync("notifications-payment-processed", envelope);
+        _logger.LogInformation("[STEP:PUBLISH] Published to payments-processed");
 
-        _logger.LogInformation("Payment {TransactionId} for order {OrderId} -> {Status} CorrelationId {CorrelationId}",
-            transaction.Id, orderEvent.OrderId, status, correlationId);
+        await _publisher.PublishAsync("notifications-payment-processed", envelope);
+        _logger.LogInformation("[STEP:PUBLISH] Published to notifications-payment-processed");
+
+        sw.Stop();
+        _logger.LogInformation(
+            "[STEP:COMPLETE] Payment processed. TransactionId={TransactionId}, OrderId={OrderId}, Status={Status}, Duration={Duration}ms",
+            transaction.Id, orderEvent.OrderId, status, sw.ElapsedMilliseconds);
     }
 }

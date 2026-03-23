@@ -35,21 +35,25 @@ try
                 ?? "Server=localhost,1433;Database=PaymentsDb;User Id=sa;Password=Your_password123;TrustServerCertificate=True;";
             var serviceBusConnection = context.Configuration["SERVICEBUS_CONNECTION"];
 
+            services.AddApplicationInsightsTelemetryWorkerService();
+
             services.AddApplication();
             services.AddInfrastructure(sqlConnection, serviceBusConnection);
         })
         .Build();
 
-    using var scope = host.Services.CreateScope();
-    var db = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
-    db.Database.EnsureCreated();
-    Log.Information("Database ensured created successfully");
+    using (var scope = host.Services.CreateScope())
+    {
+        var db = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
+        db.Database.EnsureCreated();
+        Log.Information("Database ensured created successfully");
+    }
 
     host.Run();
 }
 catch (Exception ex)
 {
-    Log.Fatal(ex, "Application terminated unexpectedly");
+    Log.Fatal("Application terminated unexpectedly: {Message}", ex.Message);
 }
 finally
 {
